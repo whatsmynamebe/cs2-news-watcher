@@ -22,6 +22,47 @@ MAX_SEEN = 500
 SUMMARY_MAX = 400
 REQUEST_TIMEOUT = 30
 
+# Feeds where every item is forwarded (official game / market signals).
+ALWAYS_FORWARD_FEEDS = frozenset({"steam_store", "steamdb_patchnotes"})
+
+# Case-insensitive, word-boundary patterns on title + summary for esports feeds (HLTV, Dexerto).
+ESPORTS_MARKET_KEYWORD_PATTERNS: list[str] = [
+    # Skins / economy
+    r"\bcases?\b",
+    r"\bcollections?\b",
+    r"\bskins?\b",
+    r"\bknives?\b",
+    r"\bgloves?\b",
+    r"\bstickers?\b",
+    r"\bcapsules?\b",
+    r"\bsouvenirs?\b",
+    r"\barmou?ry\b",
+    r"\btrade[-\s]?ups?\b",
+    r"\bcontracts?\b",
+    r"\boperations?\b",
+    r"\bmarkets?\b",
+    r"\bdrop\s+pools?\b",
+    r"\bValve\b",
+    r"\bupdates?\b",
+    r"\bpatches?\b",
+    r"\bMajor\b",
+    # Major pro-scene (not routine transfers / match coverage)
+    r"\bdisband(?:ed|s)?\b",
+    r"\bshuts?\s+down\b",
+    r"\bexits?\s+CS(?:GO|2)?\b",
+    r"\bMajor\s+champions?\b",
+    r"\bMajor\s+winners?\b",
+    r"\bwon?\s+(?:the\s+)?Major\b",
+    r"\bqualified\s+for\s+(?:the\s+)?Major\b",
+    r"\bMajor\s+qualification\b",
+    r"\beliminated\s+from\s+(?:the\s+)?Major\b",
+    r"\bMajor\s+elimination\b",
+    r"\blegendary\s+player\s+retir",
+    r"\b(?:announces?|confirm(?:s|ed)?)\s+retirement\b",
+]
+
+_ESPORTS_MARKET_RE = [re.compile(p, re.IGNORECASE) for p in ESPORTS_MARKET_KEYWORD_PATTERNS]
+
 FEEDS: list[dict[str, str]] = [
     {
         "feed": "steam_store",
@@ -197,6 +238,68 @@ def collect_feed_items() -> tuple[list[dict[str, str]], dict[str, str | int]]:
     return all_items, stats
 
 
+def item_text(item: dict[str, str]) -> str:
+    return f"{item.get('title', '')} {item.get('summary', '')}"
+
+
+def should_forward(item: dict[str, str]) -> bool:
+    if item["feed"] in ALWAYS_FORWARD_FEEDS:
+        return True
+    text = item_text(item)
+    return any(rx.search(text) for rx in _ESPORTS_MARKET_RE)
+
+
+def partition_new_items(
+    items: list[dict[str, str]],
+) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
+    forward: list[dict[str, str]] = []
+    dropped: list[dict[str, str]] = []
+    for it in items:
+        if should_forward(it):
+            forward.append(it)
+        else:
+            dropped.append(it)
+    return forward, dropped
+
+
+def mark_items_seen(state: dict[str, Any], ids: list[str]) -> None:
+    seen = state.setdefault("seen", [])
+    seen_set = set(seen)
+    for item_id in ids:
+        if item_id not in seen_set:
+            seen.append(item_id)
+            seen_set.add(item_id)
+
+
+def report_filter_stats(items: list[dict[str, str]]) -> int:
+    by_feed: dict[str, list[dict[str, str]]] = {}
+    for it in items:
+        by_feed.setdefault(it["feed"], []).append(it)
+
+    log("Filter report (current feed snapshot, no state changes):")
+    for spec in FEEDS:
+        name = spec["feed"]
+        feed_items = by_feed.get(name, [])
+        if name in ALWAYS_FORWARD_FEEDS:
+            passed = len(feed_items)
+            dropped = 0
+            passed_examples = [it["title"] for it in feed_items[:3]]
+            dropped_examples: list[str] = []
+        else:
+            passed_items = [it for it in feed_items if should_forward(it)]
+            dropped_items = [it for it in feed_items if not should_forward(it)]
+            passed = len(passed_items)
+            dropped = len(dropped_items)
+            passed_examples = [it["title"] for it in passed_items[:3]]
+            dropped_examples = [it["title"] for it in dropped_items[:3]]
+        log(f"  {name}: {passed} pass, {dropped} drop (of {len(feed_items)} items)")
+        if passed_examples:
+            log("    pass examples: " + " | ".join(passed_examples))
+        if dropped_examples:
+            log("    drop examples: " + " | ".join(dropped_examples))
+    return 0
+
+
 def post_webhook(url: str, auth_header: str, items: list[dict[str, str]]) -> None:
     payload_items = [
         {
@@ -221,6 +324,10 @@ def post_webhook(url: str, auth_header: str, items: list[dict[str, str]]) -> Non
 
 
 def main() -> int:
+    if "--filter-stats" in sys.argv:
+        fetched, _stats = collect_feed_items()
+        return report_filter_stats(fetched)
+
     state = load_state()
     seen_set = set(state.get("seen", []))
 
@@ -230,10 +337,7 @@ def main() -> int:
 
     if not state.get("seeded"):
         log("First run: seeding state with current items (no webhook).")
-        for it in fetched:
-            if it["id"] not in seen_set:
-                state.setdefault("seen", []).append(it["id"])
-                seen_set.add(it["id"])
+        mark_items_seen(state, [it["id"] for it in fetched])
         state["seeded"] = True
         save_state(state)
         mark_github_env_state_changed()
@@ -243,24 +347,40 @@ def main() -> int:
         log("No new items.")
         return 0
 
+    to_forward, filtered_out = partition_new_items(new_items)
+    if filtered_out:
+        log(f"Filtered out {len(filtered_out)} esports item(s) (marked seen, no POST).")
+        mark_items_seen(state, [it["id"] for it in filtered_out])
+
+    if not to_forward:
+        log("No new items to forward after filtering.")
+        save_state(state)
+        mark_github_env_state_changed()
+        return 0
+
     webhook_url = os.environ.get("WEBHOOK_URL", "").strip()
     webhook_auth = os.environ.get("WEBHOOK_AUTH", "").strip()
     if not webhook_url or not webhook_auth:
         log(
             "WEBHOOK_URL and/or WEBHOOK_AUTH are not set; skipping POST "
-            f"({len(new_items)} new item(s) will retry next run)."
+            f"({len(to_forward)} forward item(s) will retry next run)."
         )
+        if filtered_out:
+            save_state(state)
+            mark_github_env_state_changed()
         return 0
 
     try:
-        post_webhook(webhook_url, webhook_auth, new_items)
+        post_webhook(webhook_url, webhook_auth, to_forward)
     except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError) as exc:
-        log(f"Webhook POST failed ({exc}); not marking items as seen.")
+        log(f"Webhook POST failed ({exc}); not marking forward item(s) as seen.")
+        if filtered_out:
+            save_state(state)
+            mark_github_env_state_changed()
         return 0
 
-    log(f"Webhook POST succeeded for {len(new_items)} new item(s).")
-    for it in new_items:
-        state.setdefault("seen", []).append(it["id"])
+    log(f"Webhook POST succeeded for {len(to_forward)} new item(s).")
+    mark_items_seen(state, [it["id"] for it in to_forward])
     save_state(state)
     mark_github_env_state_changed()
     return 0
