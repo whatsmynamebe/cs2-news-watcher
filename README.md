@@ -29,7 +29,7 @@ Preview filtering against live feeds (no state or webhook):
 python3 scripts/watch_cs2_news.py --filter-stats
 ```
 
-The scheduled workflow also commits state updates periodically so GitHub does not disable the workflow for inactivity.
+Scheduled GitHub Actions runs are **disabled**; the watcher now runs on another machine. The workflow here is kept for optional manual runs only.
 
 ## Feeds
 
@@ -77,7 +77,6 @@ If either secret is missing, the watcher logs a message and exits without failin
 
 **Actions → CS2 News Watcher → Run workflow → Run workflow**
 
-Or push to `main` after merging; the schedule runs every 5 minutes (`*/5 * * * *`).
 
 ## Local development
 
