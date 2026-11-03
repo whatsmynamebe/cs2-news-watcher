@@ -1,0 +1,42 @@
+name: CS2 News Watcher
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: cs2-news-watcher
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Poll feeds and notify
+        env:
+          WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
+          WEBHOOK_AUTH: ${{ secrets.WEBHOOK_AUTH }}
+        run: python scripts/watch_cs2_news.py
+
+      - name: Commit state if changed
+        if: env.STATE_CHANGED == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add state/seen.json
+          git diff --staged --quiet && exit 0
+          git commit -m "chore(cs2-news-watcher): update seen state"
+          git pull --rebase origin "${GITHUB_REF_NAME}"
+          git push
