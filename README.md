@@ -7,7 +7,27 @@ On each run the workflow:
 1. Fetches configured RSS feeds.
 2. Compares item IDs against `state/seen.json` in this repo.
 3. **First run only:** records everything currently in the feeds as already seen and does **not** call the webhook (avoids a flood of old headlines).
-4. **Later runs:** if there are new items, POSTs one JSON payload to your webhook; if the POST succeeds, those IDs are saved to `state/seen.json` and committed. If nothing is new, or the webhook is missing/fails, no POST is sent and failed items stay unseen for retry.
+4. **Later runs:** classifies new items, POSTs one JSON payload for items that pass the filter, and updates `state/seen.json`. Filtered-out esports headlines are still marked seen so they are not reconsidered. If the webhook POST fails, only **forward** items stay unseen for retry.
+
+### Skin-market filter
+
+| Feed | Rule |
+|------|------|
+| `steam_store`, `steamdb_patchnotes` | **Always forward** (official updates and every patch note). |
+| `hltv`, `dexerto_cs` | Forward only when the title or summary matches a keyword pattern (word boundaries, case-insensitive). |
+
+Edit the lists at the top of `scripts/watch_cs2_news.py`:
+
+- `ALWAYS_FORWARD_FEEDS` — feeds that bypass keyword filtering.
+- `ESPORTS_MARKET_KEYWORD_PATTERNS` — regex patterns for esports feeds, including skin/economy terms (`case`, `collection`, `skin`, `knife`, `glove`, `sticker`, `capsule`, `souvenir`, `armory`, `trade-up`, `contract`, `operation`, `market`, `drop pool`, `Valve`, `update`, `patch`, `Major`) and major pro-scene events (`disband`, org shuts down / exits CS, Major wins/qualification/elimination, high-profile retirement wording).
+
+Routine roster moves, match previews/results, and opinion pieces are dropped unless they also hit a market keyword.
+
+Preview filtering against live feeds (no state or webhook):
+
+```bash
+python3 scripts/watch_cs2_news.py --filter-stats
+```
 
 The scheduled workflow also commits state updates periodically so GitHub does not disable the workflow for inactivity.
 
@@ -51,7 +71,7 @@ In GitHub: **Settings → Secrets and variables → Actions → New repository s
 1. **`WEBHOOK_URL`** — full URL to POST the JSON payload to.
 2. **`WEBHOOK_AUTH`** — the complete value for the `Authorization` request header (for example `Bearer your-token`). The workflow sends `Authorization: <WEBHOOK_AUTH>` exactly as stored.
 
-If either secret is missing, the watcher logs a message and exits without failing the job; new items are **not** marked seen so they can be sent after you add secrets.
+If either secret is missing, the watcher logs a message and exits without failing the job. Items that would be forwarded stay unseen for retry; filtered-out items are still marked seen.
 
 ## Manual run
 
